@@ -1,111 +1,86 @@
-# WSDL service.properties Metadata Extraction & Overview Plan
+# Implementation Plan: Client-side Project Metadata Caching & Lazy Specification Inspection
 
-Extract specification metadata from `generated-reference/nl/bkwi/specification/wsdl/*/service.properties` files in WSDL projects and display key attributes (Service Name, Operation Count, abbreviated Header version, and abbreviated FWI version) in the main project overview and detailed inspection views.
+## Context & Problem
+Every time the application loads, it fetches all repositories under the root group (~300 projects). Previously, `GitlabApi.refreshData()` immediately triggered `resolveAllProjectMetadata(projectsList)` for all 300 projects simultaneously in batches of 6, where each project initiated 6–10 subsequent requests (tags, branch commits, commits history, recursive tree scans across multiple paths, raw service.properties file downloads, and OpenAPI YAML checks). For 300+ repositories, this led to **over 3,000 network requests** to the GitLab instance on every page load, causing browser congestion, network timeouts, and potential GitLab API rate limiting.
 
-## User Review & Critical Decisions
-
-> [!IMPORTANT]
-> The following metadata extraction and layout specifications were aligned with your requirements:
-
-- **Target Path Pattern**: Locate `service.properties` under `generated-reference/nl/bkwi/specification/wsdl/*/service.properties` (using the project's default branch, e.g. `master`).
-- **Overview Table Key Metadata**:
-  1. **Service Name**: Derived from `name=` in the property file (e.g. `BijstandsregelingenIncJustitieGegWGS-v0100`).
-  2. **Operation Count & Names**: Parsed from multi-line `operation.names=\ ... \` property, showing the numeric count with operation names on hover.
-  3. **SuwiML Header Version (Abbreviated)**: Extracted from `suwiml.header` (e.g. `v0401` or `—` if blank).
-  4. **SuwiML FWI Version (Abbreviated)**: Extracted from namespace in `suwiml.fwi` (e.g. `http://bkwi.nl/SuwiML/FWI/v0205` $\rightarrow$ `v0205`).
-- **Inspection Drawer Integration**: Dedicated "SuwiML Service Contract Properties" panel in the Project Detail Drawer displaying full operation namespaces, actions, WSDL/XSD schema paths (`schema.wsdl`, `schema.request`), broker filter key expression (`filter.key.expression`), and generated test payload snippets (`request.valid`, `request.notfound`).
+Based on the user's requirements:
+1. **Cache key:** Cache metadata keyed by `projectId`, storing the `latestCommitSha`, `specType`, `currentTag`, `serviceProperties`, `operations`, and cached timestamp.
+2. **Persistence:** Use **IndexedDB** for persistent offline and multi-session storage, with graceful fallback to `localStorage` (and in-memory fallback if storage APIs are restricted).
+3. **Execution strategy:** **Lazy inspection plus on-demand single-project and bulk refresh**:
+   - Initial load only fetches the project & subgroup list (only a few paginated requests to `/groups/:id/projects`).
+   - If cached metadata exists for a project in IndexedDB, the project table immediately displays cached information (spec type, version tag, operations count, etc.) without making any additional requests.
+   - When a user opens/inspects a specific project drawer or clicks an inline "Refresh" button on a row, check the project's default branch latest commit hash against the cached commit hash. If unchanged, reuse the cached metadata; if changed or missing, fetch and update the cache.
+   - Provide a "Scan All Unresolved" / "Bulk Refresh" button with progress indication so users can update all projects on demand when desired without forcing 3,000 requests on start.
+   - Provide visual cache indicators in the UI (e.g. cached badge, last verified timestamp, one-click refresh button per project, and cache management in settings with a "Clear Cache" button).
 
 ---
 
-## 1. Overview & Core Concept
+## Proposed Changes
 
-### What It Does
-When scanning projects from GitLab (in both Live and Demo modes), the application locates `generated-reference/nl/bkwi/specification/wsdl/*/service.properties`, parses its multi-line key-value entries, extracts canonical SuwiML contract parameters, and enriches the project entity.
+### 1. New Service: `ProjectCacheService` (`/src/app/services/project-cache.ts`)
+- Implements an IndexedDB store (`gitlab_spec_cache_db`, store: `project_metadata`) with `localStorage` and memory fallbacks.
+- Store schema per project record:
+  ```ts
+  export interface CachedProjectMetadata {
+    projectId: number;
+    defaultBranch: string;
+    latestCommitSha: string;
+    specType: SpecType;
+    currentTag: string;
+    operations?: string[];
+    suwimlHeaderVersion?: string;
+    serviceProperties?: SuwimlServiceProperties;
+    cachedAt: number; // timestamp
+    lastVerifiedAt?: number;
+  }
+  ```
+- Exposes async methods:
+  - `get(projectId: number): Promise<CachedProjectMetadata | null>`
+  - `getAll(): Promise<Map<number, CachedProjectMetadata>>`
+  - `set(record: CachedProjectMetadata): Promise<void>`
+  - `setBatch(records: CachedProjectMetadata[]): Promise<void>`
+  - `delete(projectId: number): Promise<void>`
+  - `clear(): Promise<void>`
+  - `getStorageStats(): Promise<{ count: number; storageType: 'indexeddb' | 'localstorage' | 'memory' }>`
 
-### Namespace to Abbreviated Version Mapping
-- `http://bkwi.nl/SuwiML/FWI/v0205` $\rightarrow$ **`v0205`**
-- `http://suwiml.suwinet.nl/headers/v0401` $\rightarrow$ **`v0401`**
-- `http://bkwi.nl/SuwiML/Diensten/BijstandsregelingenIncJustitieGegWGS/v0100` $\rightarrow$ **`v0100`**
+### 2. Update `GitlabApi` (`/src/app/services/gitlab-api.ts`)
+- Inject `ProjectCacheService`.
+- On `refreshData()`:
+  - Fetch subgroup list and projects list via `/groups/:id/projects`.
+  - Load all cached entries from `ProjectCacheService` in a single fast IndexedDB query.
+  - Merge existing cached metadata immediately into the `projects` signal: projects with cached metadata immediately show their `specType`, `currentTag`, `operations`, and `serviceProperties` with zero extra network requests!
+  - **Crucially: Do NOT automatically run `resolveAllProjectMetadata` for all projects.**
+- Implement targeted single-project resolution:
+  - `resolveProjectMetadata(project: GitlabProject, force = false): Promise<GitlabProject>`:
+    1. Fetch current commit SHA of the project's default branch (1 cheap request to `/repository/branches/:branch`).
+    2. If not `force`, compare with cached `latestCommitSha`. If matching, return cached data and update `lastVerifiedAt`.
+    3. If different or uncached, perform metadata resolution (resolve version tag, service.properties, and OpenAPI YAML), persist to IndexedDB, and update `this.projects` signal.
+- Provide `resolveAllProjectMetadata(projectsList?: GitlabProject[], force = false)` as an explicit user-triggered action (with abort/cancel capability and progress tracking), instead of running automatically on startup.
+- Update `executeAtomicCommitAndPipeline`: upon successful commit, invalidate/update the cache for that project.
 
----
+### 3. Update Project Detail Drawer (`/src/app/components/project-detail/project-detail-drawer.ts`)
+- When the drawer opens for a project:
+  - Check if the project is already verified or needs commit hash check.
+  - Trigger `resolveProjectMetadata(project)` in the background if uncached or to verify latest commit hash.
+  - Display cache status in drawer header:
+    - E.g., `Cached (SHA: 7a8b9c...) · Verified just now` with a "Force Refresh" button to re-fetch even if commit hash matches.
 
-## 2. User Experience & Visual Design
+### 4. Update Project Explorer (`/src/app/components/project-explorer/project-explorer.ts`)
+- Add a cache status badge/indicator in the table for each project (`Cached`, `Live Verified`, or `Unresolved`).
+- Add a single-click "Refresh" icon action on each table row to check/refresh that specific project.
+- In the toolbar:
+  - Add an on-demand button: "Scan Unresolved (X)" or "Refresh All Metadata" with clear tooltip explaining it will fetch only uncached/changed projects.
+  - Show cache statistics: e.g., "302 / 315 projects cached in IndexedDB".
 
-### Projects Overview Table Enhancements
-Add high-density, unboxed metadata columns to the project table:
-- **Specification Project**: Project Name + Service Name subtitle (from `name=`)
-- **Subgroup**: Subgroup identifier (e.g. `svb-social-security`, `uwv-employment-benefits`)
-- **Type**: Spec type (SuwiML SOAP / OpenAPI)
-- **Operations**: Numerical count with operation pill-free text (e.g. `1 op: BijstandsregelingenIncJustitieGegInfo`)
-- **SuwiML Protocol**: Abbreviated Header & FWI versions (e.g. `FWI v0205 · Header v0401`)
-- **Version Tag**: Raw `x.y.z` tag (e.g. `1.0.0`)
-- **Actions**: Inspect / Update via Zip
-
-### Project Detail Drawer Enhancements
-- Structured cards for:
-  - **SuwiML Protocol Settings**: FWI version (`v0205`), Addressing, Security, Nietsgevonden flags.
-  - **WSDL & Schemas**: Paths to `schema.wsdl`, `schema.request`, `schema.response`, `schema.typeless`, and `schema.sample`.
-  - **Broker Filter Expression**: XPath expression (`/*[local-name() = ...]/*[local-name() = 'Burgerservicenr']`).
-  - **Test XML Payloads**: Formatted XML snippets for `request.valid` and `request.notfound`.
-
----
-
-## 3. Technical Architecture & Data Strategy
-
-### Properties Parser Architecture
-
-```
-generated-reference/nl/bkwi/specification/wsdl/*/service.properties
-                              │
-                              ▼
-           ┌──────────────────────────────────────┐
-           │     ServicePropertiesParser          │
-           │  - Multi-line continuation (\)       │
-           │  - Operation names array parsing     │
-           │  - Namespace version abbreviation    │
-           │  - Schema & Filter key extraction    │
-           └──────────────────┬───────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ Extracted SuwiML Metadata Entity:                               │
-│ {                                                               │
-│   serviceName: "BijstandsregelingenIncJustitieGegWGS-v0100",    │
-│   operations: ["BijstandsregelingenIncJustitieGegInfo"],        │
-│   operationsCount: 1,                                           │
-│   headerVersion: "none",                                        │
-│   fwiVersion: "v0205",                                          │
-│   wsdlSchemaPath: "nl/bkwi/specification/wsdl/.../BKWI.wsdl",   │
-│   filterKeyExpression: "/*[local-name() = ...]..."              │
-│ }                                                               │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Components to Update
-1. **`GitlabModels` (`src/app/models/gitlab.models.ts`)**:
-   - Add `SuwimlServiceProperties` interface with fields: `serviceName`, `operations`, `fwiVersion`, `headerVersion`, `schemaWsdl`, `schemaRequest`, `filterKeyExpression`, `rawProperties`.
-   - Add `serviceProperties?: SuwimlServiceProperties` to `GitlabProject`.
-2. **`ServicePropertiesParser` (`src/app/services/service-properties-parser.ts`)**:
-   - New dedicated parser service handling Java properties format with trailing line continuations (`\`).
-   - Abbreviates FWI/Header versions by matching `v\d{4}` or trailing path segments.
-3. **`GitlabApi` (`src/app/services/gitlab-api.ts`)**:
-   - In Live Mode: fetches `generated-reference/nl/bkwi/specification/wsdl/*/service.properties` from the default branch (`master`) and parses it into `project.serviceProperties`.
-   - In Demo Mode: provides realistic parsed metadata matching the user's exact example.
-4. **`ProjectExplorer` (`src/app/components/project-explorer/project-explorer.ts`)**:
-   - Update table to display Service Name, Operation count, and abbreviated Header & FWI versions.
-5. **`ProjectDetailDrawer` (`src/app/components/project-detail/project-detail-drawer.ts`)**:
-   - Add visual panels for the SuwiML broker filter, schema paths, and XML sample payloads.
+### 5. Update Connection Modal / Settings (`/src/app/components/connection-modal/connection-modal.ts`)
+- Add a "Cache Management" section:
+  - Shows cache storage type (IndexedDB), number of cached projects, and a "Clear Cache" button.
 
 ---
 
-## 4. Verification & Testing Plan
-
-1. **Parser Unit Verification**:
-   - Verify parsing of multi-line `operation.names=\ \n op1 \`.
-   - Verify extracting `v0205` from `http://bkwi.nl/SuwiML/FWI/v0205`.
-   - Verify XML test payloads and filter expressions extraction.
-2. **UI Verification**:
-   - Verify table column alignment, responsive typography, and clean unboxed presentation.
-   - Verify project detail drawer displays all contract details.
-3. **Compilation & Linting**:
-   - Run `lint_applet` and `compile_applet` to confirm zero errors.
+## Verification Plan
+1. **Compilation Check**: Run `compile_applet` and `lint_applet` to ensure strictly typed Angular 21 zoneless code without compilation or lint errors.
+2. **Startup Request Count**: Verify that starting the application only issues requests for the groups/projects list, and no longer spawns 300 concurrent batches of tags, branches, commits, and tree calls.
+3. **Cache Storage**: Verify records are stored and loaded from IndexedDB on refresh.
+4. **On-Demand & Inspection**: Verify that clicking "Inspect" on a project or clicking the row refresh button checks the commit SHA and only updates when changed.
+5. **Manual Trigger**: Verify that "Scan Unresolved" bulk action works when initiated by the user with accurate progress counters.

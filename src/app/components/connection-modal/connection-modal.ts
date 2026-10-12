@@ -178,6 +178,30 @@ import { GitlabApi } from '../../services/gitlab-api';
             </div>
           }
 
+          <!-- Client-Side Metadata Cache Status -->
+          <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200 text-xs space-y-2">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <mat-icon class="text-base text-indigo-600">dns</mat-icon>
+                <span class="font-semibold text-slate-800">Persistent Metadata Cache</span>
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-indigo-100 text-indigo-800 uppercase">
+                  {{ gitlab.cachedStats().storageType }}
+                </span>
+              </div>
+              <button
+                type="button"
+                [disabled]="isClearingCache() || gitlab.cachedStats().count === 0"
+                (click)="onClearCache()"
+                class="px-2.5 py-1 text-[11px] font-medium text-rose-700 hover:text-rose-900 bg-rose-50 hover:bg-rose-100 rounded border border-rose-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 cursor-pointer">
+                <mat-icon class="text-xs" [class.animate-spin]="isClearingCache()">delete_sweep</mat-icon>
+                <span>Clear Cache</span>
+              </button>
+            </div>
+            <p class="text-[11px] text-slate-500 leading-relaxed">
+              {{ gitlab.cachedStats().count }} project specification(s) cached locally. On startup, project metadata is loaded instantly from storage with zero redundant GitLab API calls; specifications are re-verified only when inspecting or refreshing if the default branch commit hash changed.
+            </p>
+          </div>
+
           <!-- Connection Diagnostic Test Result -->
           @if (testMessage()) {
             <div
@@ -261,6 +285,7 @@ export class ConnectionModal {
   readonly testSuccess = signal<boolean>(false);
   readonly testedUser = signal<GitlabUser | null>(null);
   readonly isTesting = signal<boolean>(false);
+  readonly isClearingCache = signal<boolean>(false);
 
   readonly form = new FormGroup({
     hostUrl: new FormControl(this.gitlab.config().hostUrl, { nonNullable: true, validators: [Validators.required] }),
@@ -288,6 +313,15 @@ export class ConnectionModal {
     this.testMessage.set(result.message);
     if (result.user) {
       this.testedUser.set(result.user);
+    }
+  }
+
+  async onClearCache() {
+    this.isClearingCache.set(true);
+    try {
+      await this.gitlab.clearCache();
+    } finally {
+      this.isClearingCache.set(false);
     }
   }
 

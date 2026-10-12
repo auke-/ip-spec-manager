@@ -10,6 +10,7 @@ import {
   SuwimlServiceProperties
 } from '../models/gitlab.models';
 import { MOCK_PROJECTS, MOCK_SUBGROUPS } from './mock-data';
+import { CachedProjectMetadata, ProjectCacheService } from './project-cache';
 import { SemverService } from './semver';
 import { ServicePropertiesParser } from './service-properties-parser';
 
@@ -58,6 +59,7 @@ export class GitlabApi {
   private readonly STORAGE_KEY = 'spec_manager_gitlab_config';
   private readonly semverService = inject(SemverService);
   private readonly servicePropertiesParser = inject(ServicePropertiesParser);
+  readonly projectCache = inject(ProjectCacheService);
 
   readonly config = signal<GitlabConnectionConfig>({
     hostUrl: 'https://gitlab.example.corp',
@@ -83,6 +85,8 @@ export class GitlabApi {
   readonly isLoading = signal<boolean>(false);
   readonly isResolvingMetadata = signal<boolean>(false);
   readonly metadataProgress = signal<{ resolved: number; total: number }>({ resolved: 0, total: 0 });
+  readonly inspectingProjectIds = signal<Set<number>>(new Set());
+  readonly cachedStats = signal<{ count: number; storageType: string }>({ count: 0, storageType: 'indexeddb' });
 
   constructor() {
     this.loadSavedConfig();
@@ -288,6 +292,8 @@ export class GitlabApi {
       this.isLoading.set(false);
       this.isResolvingMetadata.set(false);
       this.metadataProgress.set({ resolved: MOCK_PROJECTS.length, total: MOCK_PROJECTS.length });
+      const stats = await this.projectCache.getStorageStats();
+      this.cachedStats.set({ count: stats.count, storageType: stats.storageType });
       return;
     }
 
@@ -309,25 +315,56 @@ export class GitlabApi {
         headers
       );
 
-      const mapped: GitlabProject[] = projData.map(p => ({
-        id: p.id,
-        name: p.name,
-        path: p.path,
-        path_with_namespace: p.path_with_namespace,
-        description: p.description || '',
-        default_branch: p.default_branch || 'master',
-        web_url: p.web_url,
-        last_activity_at: p.last_activity_at,
-        specType: 'unknown',
-        currentTag: '0.1.0',
-        subgroupId: p.namespace?.id || 0,
-        subgroupPath: p.namespace?.path || ''
-      }));
+      // Load all cached project records from IndexedDB in a single query
+      const cachedMap = await this.projectCache.getAll();
+      const stats = await this.projectCache.getStorageStats();
+      this.cachedStats.set({ count: stats.count, storageType: stats.storageType });
+
+      const mapped: GitlabProject[] = projData.map(p => {
+        const cached = cachedMap.get(p.id);
+        if (cached) {
+          // Immediately populate with cached metadata - zero extra network calls on startup!
+          return {
+            id: p.id,
+            name: p.name,
+            path: p.path,
+            path_with_namespace: p.path_with_namespace,
+            description: p.description || '',
+            default_branch: p.default_branch || cached.defaultBranch || 'master',
+            web_url: p.web_url,
+            last_activity_at: p.last_activity_at,
+            specType: cached.specType,
+            currentTag: cached.currentTag,
+            subgroupId: p.namespace?.id || 0,
+            subgroupPath: p.namespace?.path || '',
+            operations: cached.operations,
+            suwimlHeaderVersion: cached.suwimlHeaderVersion,
+            serviceProperties: cached.serviceProperties,
+            isCached: true,
+            cachedCommitSha: cached.latestCommitSha,
+            cachedAt: cached.cachedAt,
+            lastVerifiedAt: cached.lastVerifiedAt
+          };
+        }
+
+        return {
+          id: p.id,
+          name: p.name,
+          path: p.path,
+          path_with_namespace: p.path_with_namespace,
+          description: p.description || '',
+          default_branch: p.default_branch || 'master',
+          web_url: p.web_url,
+          last_activity_at: p.last_activity_at,
+          specType: 'unknown',
+          currentTag: '0.1.0',
+          subgroupId: p.namespace?.id || 0,
+          subgroupPath: p.namespace?.path || '',
+          isCached: false
+        };
+      });
+
       this.projects.set(mapped);
-
-      // Resolve tags, service.properties, and OpenAPI specifications across all projects in the background
-      this.resolveAllProjectMetadata(mapped);
-
       this.connectionStatus.set('connected');
       this.connectionError.set(null);
     } catch (err: unknown) {
@@ -340,12 +377,45 @@ export class GitlabApi {
   }
 
   /**
+   * Fetches the latest commit SHA for a project's default branch.
+   */
+  async fetchLatestCommitSha(projectId: number, defaultBranch = 'master'): Promise<string> {
+    const normalizedHost = this.config().hostUrl.replace(/\/+$/, '');
+    const headers = this.getAuthHeaders();
+
+    try {
+      const branchRes = await fetch(
+        `${normalizedHost}/api/v4/projects/${projectId}/repository/branches/${encodeURIComponent(defaultBranch)}`,
+        { headers }
+      );
+      if (branchRes.ok) {
+        const branchData = await branchRes.json() as RawGitlabBranch;
+        return branchData.commit?.id || '';
+      }
+      // Fallback: master <-> main check
+      const altBranch = defaultBranch === 'master' ? 'main' : 'master';
+      const altBranchRes = await fetch(
+        `${normalizedHost}/api/v4/projects/${projectId}/repository/branches/${encodeURIComponent(altBranch)}`,
+        { headers }
+      );
+      if (altBranchRes.ok) {
+        const altData = await altBranchRes.json() as RawGitlabBranch;
+        return altData.commit?.id || '';
+      }
+      return '';
+    } catch {
+      return '';
+    }
+  }
+
+  /**
    * Resolves project version from the latest commit on the default branch ('master' / 'main').
    * If that commit has multiple tags, sorts them using SemVer and picks the highest x.y.z.
    */
   async resolveDefaultBranchVersion(
     projectId: number,
-    defaultBranch = 'master'
+    defaultBranch = 'master',
+    knownCommitSha?: string
   ): Promise<string> {
     const normalizedHost = this.config().hostUrl.replace(/\/+$/, '');
     const headers = this.getAuthHeaders();
@@ -357,20 +427,10 @@ export class GitlabApi {
       const tags = await tagsRes.json() as RawGitlabTag[];
       if (tags.length === 0) return '0.1.0';
 
-      // 2. Fetch the latest commit on the default branch
-      let latestCommitSha = '';
-      const branchRes = await fetch(`${normalizedHost}/api/v4/projects/${projectId}/repository/branches/${encodeURIComponent(defaultBranch)}`, { headers });
-      if (branchRes.ok) {
-        const branchData = await branchRes.json() as RawGitlabBranch;
-        latestCommitSha = branchData.commit?.id || '';
-      } else {
-        // Fallback: check master if default was main, or main if master
-        const altBranch = defaultBranch === 'master' ? 'main' : 'master';
-        const altBranchRes = await fetch(`${normalizedHost}/api/v4/projects/${projectId}/repository/branches/${encodeURIComponent(altBranch)}`, { headers });
-        if (altBranchRes.ok) {
-          const altData = await altBranchRes.json() as RawGitlabBranch;
-          latestCommitSha = altData.commit?.id || '';
-        }
+      // 2. Fetch the latest commit on the default branch if not passed
+      let latestCommitSha = knownCommitSha || '';
+      if (!latestCommitSha) {
+        latestCommitSha = await this.fetchLatestCommitSha(projectId, defaultBranch);
       }
 
       if (latestCommitSha) {
@@ -628,89 +688,167 @@ export class GitlabApi {
    *    other wsdl projects are non-SuwiML soap projects.
    * 3. Projects which are not a SuwiML project, non-suwiml soap or openapi should be considered of type unknown.
    */
-  private async resolveAllProjectMetadata(projectsList: GitlabProject[]): Promise<void> {
+  /**
+   * Resolves specification metadata for a single project:
+   * 1. Checks current default branch commit hash.
+   * 2. If cached and commit hash unchanged (and not force), returns cached metadata and marks verified.
+   * 3. If commit hash changed or not cached, fetches service.properties / OpenAPI YAML / version tag,
+   *    updates IndexedDB cache, and updates the in-memory project.
+   */
+  async resolveProjectMetadata(project: GitlabProject, force = false): Promise<GitlabProject> {
+    if (this.config().isDemoMode) {
+      return project;
+    }
+
+    const projectId = project.id;
+    this.inspectingProjectIds.update(set => new Set(set).add(projectId));
+
+    try {
+      const defaultBranch = project.default_branch || 'master';
+      const latestSha = await this.fetchLatestCommitSha(projectId, defaultBranch);
+
+      // Check if cache has matching commit SHA
+      const cached = await this.projectCache.get(projectId);
+      if (!force && cached && cached.latestCommitSha && latestSha && cached.latestCommitSha === latestSha) {
+        // Cache is fresh! Update lastVerifiedAt
+        const verifiedRecord: CachedProjectMetadata = {
+          ...cached,
+          lastVerifiedAt: Date.now()
+        };
+        await this.projectCache.set(verifiedRecord);
+
+        const updatedProject: GitlabProject = {
+          ...project,
+          specType: cached.specType,
+          currentTag: cached.currentTag,
+          operations: cached.operations,
+          suwimlHeaderVersion: cached.suwimlHeaderVersion,
+          serviceProperties: cached.serviceProperties,
+          isCached: true,
+          cachedCommitSha: cached.latestCommitSha,
+          cachedAt: cached.cachedAt,
+          lastVerifiedAt: verifiedRecord.lastVerifiedAt
+        };
+
+        this.projects.update(list => list.map(p => p.id === projectId ? updatedProject : p));
+        return updatedProject;
+      }
+
+      // Metadata must be resolved
+      const [tag, serviceProps] = await Promise.all([
+        this.resolveDefaultBranchVersion(projectId, defaultBranch, latestSha),
+        this.fetchServiceProperties(projectId, defaultBranch)
+      ]);
+
+      let finalSpecType: SpecType = 'unknown';
+      let openApiOperations: string[] = [];
+
+      if (serviceProps) {
+        const hasHeader = !!(serviceProps.headerRaw && serviceProps.headerRaw.trim());
+        const hasFault = !!(serviceProps.fwiRaw && serviceProps.fwiRaw.trim());
+        if (hasHeader || hasFault) {
+          finalSpecType = 'suwiml';
+        } else {
+          finalSpecType = 'soap';
+        }
+      } else {
+        const openApiSpec = await this.fetchOpenApiSpec(projectId, defaultBranch);
+        if (openApiSpec) {
+          finalSpecType = 'openapi';
+          openApiOperations = openApiSpec.operations;
+        } else {
+          finalSpecType = 'unknown';
+        }
+      }
+
+      const operationsToStore = serviceProps?.operations?.length ? serviceProps.operations : openApiOperations;
+      const headerVersionToStore = serviceProps?.headerVersionAbbr || undefined;
+
+      const recordToCache: CachedProjectMetadata = {
+        projectId,
+        defaultBranch,
+        latestCommitSha: latestSha,
+        specType: finalSpecType,
+        currentTag: tag,
+        operations: operationsToStore,
+        suwimlHeaderVersion: headerVersionToStore,
+        serviceProperties: serviceProps || undefined,
+        cachedAt: Date.now(),
+        lastVerifiedAt: Date.now()
+      };
+
+      await this.projectCache.set(recordToCache);
+      const stats = await this.projectCache.getStorageStats();
+      this.cachedStats.set({ count: stats.count, storageType: stats.storageType });
+
+      const updatedProject: GitlabProject = {
+        ...project,
+        specType: finalSpecType,
+        currentTag: tag,
+        operations: operationsToStore,
+        suwimlHeaderVersion: headerVersionToStore,
+        serviceProperties: serviceProps || undefined,
+        isCached: true,
+        cachedCommitSha: latestSha,
+        cachedAt: recordToCache.cachedAt,
+        lastVerifiedAt: recordToCache.lastVerifiedAt
+      };
+
+      this.projects.update(list => list.map(p => p.id === projectId ? updatedProject : p));
+      return updatedProject;
+    } finally {
+      this.inspectingProjectIds.update(set => {
+        const next = new Set(set);
+        next.delete(projectId);
+        return next;
+      });
+    }
+  }
+
+  /**
+   * On-demand bulk metadata scan across projects.
+   * Can be invoked by user to scan unresolved or all projects.
+   */
+  async resolveAllProjectMetadata(projectsList?: GitlabProject[], force = false): Promise<void> {
+    const targets = projectsList || this.projects();
+    if (targets.length === 0 || this.config().isDemoMode) return;
+
     this.isResolvingMetadata.set(true);
-    this.metadataProgress.set({ resolved: 0, total: projectsList.length });
+    this.metadataProgress.set({ resolved: 0, total: targets.length });
     let resolvedCount = 0;
 
-    // Process in concurrent batches of 6 for fast discovery without overwhelming browser limits
     const batchSize = 6;
     try {
-      for (let i = 0; i < projectsList.length; i += batchSize) {
-        const batch = projectsList.slice(i, i + batchSize);
+      for (let i = 0; i < targets.length; i += batchSize) {
+        const batch = targets.slice(i, i + batchSize);
         await Promise.all(
           batch.map(async p => {
             try {
-              const [tag, serviceProps] = await Promise.all([
-                this.resolveDefaultBranchVersion(p.id, p.default_branch),
-                this.fetchServiceProperties(p.id, p.default_branch)
-              ]);
-
-              let finalSpecType: SpecType = 'unknown';
-              let openApiOperations: string[] = [];
-
-              if (serviceProps) {
-                // WSDL Project:
-                // Only wsdl projects with either a SuwiML header or fault version should be considered a SuwiML project;
-                // other wsdl projects are non-SuwiML soap projects.
-                const hasHeader = !!(serviceProps.headerRaw && serviceProps.headerRaw.trim());
-                const hasFault = !!(serviceProps.fwiRaw && serviceProps.fwiRaw.trim());
-                if (hasHeader || hasFault) {
-                  finalSpecType = 'suwiml'; // SuwiML SOAP project
-                } else {
-                  finalSpecType = 'soap';   // Non-SuwiML SOAP project
-                }
-              } else {
-                // Not having WSDL service.properties:
-                // Check if having src/main/resources/nl/bkwi/specification/openapi/*.yaml -> openapi project
-                const openApiSpec = await this.fetchOpenApiSpec(p.id, p.default_branch);
-                if (openApiSpec) {
-                  finalSpecType = 'openapi'; // OpenAPI project
-                  openApiOperations = openApiSpec.operations;
-                } else {
-                  // Not SuwiML, not non-SuwiML SOAP, not OpenAPI -> unknown
-                  finalSpecType = 'unknown';
-                }
-              }
-
-              this.projects.update(list =>
-                list.map(item => {
-                  if (item.id !== p.id) return item;
-                  const updated: GitlabProject = {
-                    ...item,
-                    currentTag: tag,
-                    specType: finalSpecType
-                  };
-
-                  if (serviceProps) {
-                    updated.serviceProperties = serviceProps;
-                    if (serviceProps.operations && serviceProps.operations.length > 0) {
-                      updated.operations = serviceProps.operations;
-                    }
-                    if (serviceProps.headerVersionAbbr) {
-                      updated.suwimlHeaderVersion = serviceProps.headerVersionAbbr;
-                    }
-                  } else if (openApiOperations.length > 0) {
-                    updated.operations = openApiOperations;
-                  }
-
-                  return updated;
-                })
-              );
+              await this.resolveProjectMetadata(p, force);
             } catch {
-              // Non-blocking: individual project error shouldn't stop overall progress
+              // individual failure non-blocking
             }
           })
         );
         resolvedCount += batch.length;
         this.metadataProgress.set({
-          resolved: Math.min(resolvedCount, projectsList.length),
-          total: projectsList.length
+          resolved: Math.min(resolvedCount, targets.length),
+          total: targets.length
         });
       }
     } finally {
       this.isResolvingMetadata.set(false);
+      const stats = await this.projectCache.getStorageStats();
+      this.cachedStats.set({ count: stats.count, storageType: stats.storageType });
     }
+  }
+
+  async clearCache(): Promise<void> {
+    await this.projectCache.clear();
+    const stats = await this.projectCache.getStorageStats();
+    this.cachedStats.set({ count: stats.count, storageType: stats.storageType });
+    // Invalidate cached flag in memory
+    this.projects.update(list => list.map(p => ({ ...p, isCached: false })));
   }
 
   private getAuthHeaders(): Record<string, string> {
@@ -949,6 +1087,18 @@ export class GitlabApi {
     }
 
     const commitData = await commitRes.json() as RawGitlabCommit;
+
+    // Invalidate cached metadata for this project so fresh specs are queried next inspection
+    try {
+      await this.projectCache.delete(params.project.id);
+      // Immediately resolve with new commit SHA in background
+      this.resolveProjectMetadata({
+        ...params.project,
+        currentTag: params.newVersionTag
+      }, true);
+    } catch {
+      // non-blocking
+    }
 
     // Trigger CI Pipeline
     let pipelineId: number | undefined;

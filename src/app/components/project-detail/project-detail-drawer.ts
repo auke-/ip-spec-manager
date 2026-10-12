@@ -1,12 +1,13 @@
-import { ChangeDetectionStrategy, Component, computed, input, output, signal } from '@angular/core';
-import { UpperCasePipe } from '@angular/common';
+import { ChangeDetectionStrategy, Component, computed, inject, input, OnInit, output, signal } from '@angular/core';
+import { DatePipe, UpperCasePipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { GitlabProject } from '../../models/gitlab.models';
+import { GitlabApi } from '../../services/gitlab-api';
 
 @Component({
   selector: 'app-project-detail-drawer',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, UpperCasePipe],
+  imports: [MatIconModule, UpperCasePipe, DatePipe],
   template: `
     <div class="fixed inset-0 z-50 overflow-hidden bg-slate-900/50 backdrop-blur-xs flex justify-end">
       <div class="w-full max-w-4xl bg-white h-full shadow-2xl flex flex-col border-l border-slate-200 animate-in slide-in-from-right duration-200">
@@ -15,18 +16,18 @@ import { GitlabProject } from '../../models/gitlab.models';
         <div class="p-6 border-b border-slate-200 flex items-start justify-between bg-slate-50/60">
           <div>
             <div class="flex items-center gap-2 flex-wrap">
-              <span class="text-xs font-mono text-slate-500">{{ project().subgroupPath }}</span>
+              <span class="text-xs font-mono text-slate-500">{{ currentProject().subgroupPath }}</span>
               <span class="text-slate-300">/</span>
-              <span class="text-xs font-mono font-bold text-indigo-600">{{ project().currentTag || '0.1.0' }}</span>
-              @if (project().specType === 'suwiml') {
+              <span class="text-xs font-mono font-bold text-indigo-600">{{ currentProject().currentTag || '0.1.0' }}</span>
+              @if (currentProject().specType === 'suwiml') {
                 <span class="px-2 py-0.5 text-[10px] font-mono font-semibold bg-indigo-50 text-indigo-700 rounded border border-indigo-200/60">
-                  SuwiML FWI {{ project().serviceProperties?.fwiVersionAbbr }}
+                  SuwiML FWI {{ currentProject().serviceProperties?.fwiVersionAbbr }}
                 </span>
-              } @else if (project().specType === 'soap') {
+              } @else if (currentProject().specType === 'soap') {
                 <span class="px-2 py-0.5 text-[10px] font-mono font-semibold bg-slate-100 text-slate-700 rounded border border-slate-200">
                   Non-SuwiML SOAP
                 </span>
-              } @else if (project().specType === 'openapi') {
+              } @else if (currentProject().specType === 'openapi') {
                 <span class="px-2 py-0.5 text-[10px] font-mono font-semibold bg-emerald-50 text-emerald-700 rounded border border-emerald-200/60">
                   OpenAPI 3.x
                 </span>
@@ -35,14 +36,41 @@ import { GitlabProject } from '../../models/gitlab.models';
                   Unknown
                 </span>
               }
+
+              <!-- Cache Verification Chip -->
+              @if (isCheckingCommit()) {
+                <span class="px-2 py-0.5 text-[10px] font-mono font-medium bg-indigo-50 text-indigo-700 rounded border border-indigo-200/60 flex items-center gap-1">
+                  <mat-icon class="text-xs animate-spin">sync</mat-icon>
+                  <span>Verifying commit SHA...</span>
+                </span>
+              } @else if (currentProject().isCached) {
+                <span class="px-2 py-0.5 text-[10px] font-mono font-medium bg-emerald-50 text-emerald-700 rounded border border-emerald-200/60 flex items-center gap-1"
+                  [title]="'Commit: ' + (currentProject().cachedCommitSha || 'unknown') + (currentProject().lastVerifiedAt ? ' · Verified ' + (currentProject().lastVerifiedAt | date:'medium') : '')">
+                  <mat-icon class="text-xs text-emerald-600">offline_pin</mat-icon>
+                  <span>Cached @ {{ currentProject().cachedCommitSha ? currentProject().cachedCommitSha!.substring(0, 7) : 'latest' }}</span>
+                </span>
+              }
             </div>
-            <h2 class="text-lg font-bold text-slate-900 mt-1 font-display">
-              {{ project().serviceProperties?.serviceName || project().name }}
-            </h2>
-            @if (project().serviceProperties?.serviceName && project().serviceProperties?.serviceName !== project().name) {
-              <div class="text-xs text-slate-500 font-mono mt-0.5">Repo: {{ project().name }}</div>
+            <div class="flex items-center gap-3 mt-1">
+              <h2 class="text-lg font-bold text-slate-900 font-display">
+                {{ currentProject().serviceProperties?.serviceName || currentProject().name }}
+              </h2>
+              @if (!gitlab.config().isDemoMode) {
+                <button
+                  type="button"
+                  [disabled]="isCheckingCommit()"
+                  (click)="forceRefresh()"
+                  title="Force re-fetch all files and properties from GitLab"
+                  class="px-2 py-0.5 text-[10px] font-semibold text-slate-600 hover:text-indigo-600 hover:bg-slate-200/60 rounded border border-slate-300 transition-colors flex items-center gap-1 disabled:opacity-50">
+                  <mat-icon class="text-xs" [class.animate-spin]="isCheckingCommit()">sync</mat-icon>
+                  <span>Force Refresh</span>
+                </button>
+              }
+            </div>
+            @if (currentProject().serviceProperties?.serviceName && currentProject().serviceProperties?.serviceName !== currentProject().name) {
+              <div class="text-xs text-slate-500 font-mono mt-0.5">Repo: {{ currentProject().name }}</div>
             }
-            <p class="text-xs text-slate-600 mt-1 leading-relaxed">{{ project().description }}</p>
+            <p class="text-xs text-slate-600 mt-1 leading-relaxed">{{ currentProject().description }}</p>
           </div>
           <button
             type="button"
@@ -557,28 +585,59 @@ service {{ protoServiceName() }}Service &#123;
     </div>
   `
 })
-export class ProjectDetailDrawer {
+export class ProjectDetailDrawer implements OnInit {
+  readonly gitlab = inject(GitlabApi);
+
   readonly project = input.required<GitlabProject>();
   readonly closeRequested = output<void>();
   readonly updateProjectViaZip = output<GitlabProject>();
 
   readonly activeTab = signal<'service-properties' | 'contract' | 'extracted' | 'pipeline'>('service-properties');
+  readonly isCheckingCommit = signal<boolean>(false);
+
+  // Keep project data dynamically up to date with any changes in GitlabApi's project signal
+  readonly currentProject = computed(() => {
+    const fromApi = this.gitlab.projects().find(p => p.id === this.project().id);
+    return fromApi || this.project();
+  });
+
+  async ngOnInit() {
+    // When drawer opens, check if commit hash is verified or resolve lazy if uncached
+    const p = this.currentProject();
+    if (!this.gitlab.config().isDemoMode) {
+      this.isCheckingCommit.set(true);
+      try {
+        await this.gitlab.resolveProjectMetadata(p, false);
+      } finally {
+        this.isCheckingCommit.set(false);
+      }
+    }
+  }
+
+  async forceRefresh() {
+    this.isCheckingCommit.set(true);
+    try {
+      await this.gitlab.resolveProjectMetadata(this.currentProject(), true);
+    } finally {
+      this.isCheckingCommit.set(false);
+    }
+  }
 
   readonly protoPackage = computed(() => {
-    return this.project().path.replace(/-/g, '.');
+    return this.currentProject().path.replace(/-/g, '.');
   });
 
   readonly protoServiceName = computed(() => {
-    return this.project().name.replace(/[^a-zA-Z0-9]/g, '');
+    return this.currentProject().name.replace(/[^a-zA-Z0-9]/g, '');
   });
 
   readonly rawPropertiesCount = computed(() => {
-    const raw = this.project().serviceProperties?.rawProperties;
+    const raw = this.currentProject().serviceProperties?.rawProperties;
     return raw ? Object.keys(raw).length : 0;
   });
 
   readonly rawPropertiesFormatted = computed(() => {
-    const raw = this.project().serviceProperties?.rawProperties;
+    const raw = this.currentProject().serviceProperties?.rawProperties;
     if (!raw) return '# No service.properties metadata loaded';
     return Object.entries(raw).map(([k, v]) => `${k}=${v}`).join('\n');
   });

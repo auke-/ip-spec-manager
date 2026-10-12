@@ -99,6 +99,10 @@ export interface GitlabProject {
   readme?: string;
   propertyMetadata?: Record<string, string>;
   files?: { path: string; content: string }[];
+  isCached?: boolean;
+  cachedCommitSha?: string;
+  cachedAt?: number;
+  lastVerifiedAt?: number;
 }
 
 export interface UnpackedFile {

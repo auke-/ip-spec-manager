@@ -1,3 +1,4 @@
+import { DatePipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, computed, inject, output, signal } from '@angular/core';
 import { FormControl, ReactiveFormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
@@ -7,19 +8,30 @@ import { GitlabApi } from '../../services/gitlab-api';
 @Component({
   selector: 'app-project-explorer',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [ReactiveFormsModule, MatIconModule],
+  imports: [ReactiveFormsModule, MatIconModule, DatePipe],
   template: `
     <div class="space-y-6">
       
       <!-- Metrics & Overview Strip -->
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div class="bg-white p-4 rounded-xl border border-slate-200">
-          <div class="text-xs font-medium text-slate-500">Total Specification Repos</div>
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-medium text-slate-500">Total Repositories</span>
+            @if (cachedCount() > 0) {
+              <span class="inline-flex items-center gap-1 text-[10px] font-mono font-medium text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200/60" title="Cached in IndexedDB">
+                <mat-icon class="text-[10px] text-emerald-600">offline_pin</mat-icon>
+                <span>{{ cachedCount() }} cached</span>
+              </span>
+            }
+          </div>
           <div class="text-2xl font-bold font-mono tabular-nums text-slate-900 mt-1">
             {{ gitlab.projects().length }}
           </div>
-          <div class="text-[11px] text-slate-400 mt-1 flex items-center gap-1">
-            <span>Across {{ gitlab.subgroups().length }} active subgroups</span>
+          <div class="text-[11px] text-slate-400 mt-1 flex items-center justify-between">
+            <span>Across {{ gitlab.subgroups().length }} subgroups</span>
+            @if (unresolvedCount() > 0 && !gitlab.config().isDemoMode) {
+              <span class="text-amber-600 font-medium">{{ unresolvedCount() }} lazy/uncached</span>
+            }
           </div>
         </div>
 
@@ -139,13 +151,42 @@ import { GitlabApi } from '../../services/gitlab-api';
           </div>
 
           <!-- New Project Action -->
-          <button
-            type="button"
-            (click)="createNewProject.emit()"
-            class="px-3.5 py-2 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0">
-            <mat-icon class="text-base">add</mat-icon>
-            <span>Create New Spec Project</span>
-          </button>
+          <!-- Action Buttons & Cache Controls -->
+          <div class="flex items-center gap-2 flex-wrap justify-end">
+            @if (!gitlab.config().isDemoMode) {
+              <!-- Scan Unresolved on-demand button -->
+              @if (unresolvedCount() > 0) {
+                <button
+                  type="button"
+                  [disabled]="gitlab.isResolvingMetadata()"
+                  (click)="scanUnresolved()"
+                  title="Discover specs and tags for uncached projects on-demand"
+                  class="px-3 py-2 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-lg transition-colors flex items-center gap-1.5 border border-indigo-200/70 disabled:opacity-50">
+                  <mat-icon class="text-sm" [class.animate-spin]="gitlab.isResolvingMetadata()">troubleshoot</mat-icon>
+                  <span>Scan Unresolved ({{ unresolvedCount() }})</span>
+                </button>
+              }
+
+              <!-- Refresh all button -->
+              <button
+                type="button"
+                [disabled]="gitlab.isResolvingMetadata() || gitlab.isLoading()"
+                (click)="refreshAllWithCacheCheck()"
+                title="Verify commit hashes and update any changed projects"
+                class="px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors flex items-center gap-1.5 border border-slate-200 disabled:opacity-50">
+                <mat-icon class="text-sm" [class.animate-spin]="gitlab.isResolvingMetadata()">sync</mat-icon>
+                <span>Verify All Commits</span>
+              </button>
+            }
+
+            <button
+              type="button"
+              (click)="createNewProject.emit()"
+              class="px-3.5 py-2 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0">
+              <mat-icon class="text-base">add</mat-icon>
+              <span>Create New Spec Project</span>
+            </button>
+          </div>
 
         </div>
 
@@ -222,6 +263,7 @@ import { GitlabApi } from '../../services/gitlab-api';
                   <th class="py-3 px-3">Operations</th>
                   <th class="py-3 px-3">SuwiML Protocol</th>
                   <th class="py-3 px-3">Version Tag</th>
+                  <th class="py-3 px-3">Cache State</th>
                   <th class="py-3 px-3">CI Extraction</th>
                   <th class="py-3 px-4 text-right">Actions</th>
                 </tr>
@@ -331,6 +373,31 @@ import { GitlabApi } from '../../services/gitlab-api';
                       </span>
                     </td>
 
+                    <!-- Cache State -->
+                    <td class="py-3 px-3 whitespace-nowrap">
+                      @if (gitlab.inspectingProjectIds().has(proj.id)) {
+                        <span class="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-600">
+                          <mat-icon class="text-xs animate-spin">sync</mat-icon>
+                          <span>Checking SHA...</span>
+                        </span>
+                      } @else if (proj.isCached) {
+                        <div class="flex items-center gap-1.5" [title]="'Commit: ' + (proj.cachedCommitSha || 'unknown') + (proj.lastVerifiedAt ? ' · Verified ' + (proj.lastVerifiedAt | date:'shortTime') : '')">
+                          <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-emerald-50 text-emerald-700 border border-emerald-200/60">
+                            <mat-icon class="text-[11px] text-emerald-600">offline_pin</mat-icon>
+                            <span>Cached</span>
+                          </span>
+                          @if (proj.cachedCommitSha) {
+                            <span class="text-[10px] font-mono text-slate-400 max-w-[50px] truncate">{{ proj.cachedCommitSha.substring(0, 7) }}</span>
+                          }
+                        </div>
+                      } @else {
+                        <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-slate-100 text-slate-500 border border-slate-200">
+                          <mat-icon class="text-[11px] text-slate-400">schedule</mat-icon>
+                          <span>Unresolved</span>
+                        </span>
+                      }
+                    </td>
+
                     <!-- Pipeline Status -->
                     <td class="py-3 px-3 whitespace-nowrap">
                       @if (proj.latestPipeline) {
@@ -357,6 +424,18 @@ import { GitlabApi } from '../../services/gitlab-api';
                     <!-- Actions -->
                     <td class="py-3 px-4 text-right whitespace-nowrap">
                       <div class="flex items-center justify-end gap-1.5">
+
+                        <!-- On-demand individual project refresh -->
+                        @if (!gitlab.config().isDemoMode) {
+                          <button
+                            type="button"
+                            [disabled]="gitlab.inspectingProjectIds().has(proj.id)"
+                            (click)="refreshSingleProject(proj, $event)"
+                            title="Check if commit hash changed and refresh specification metadata"
+                            class="p-1 text-slate-400 hover:text-indigo-600 hover:bg-slate-100 rounded transition-colors disabled:opacity-50">
+                            <mat-icon class="text-sm" [class.animate-spin]="gitlab.inspectingProjectIds().has(proj.id)">sync</mat-icon>
+                          </button>
+                        }
                         
                         <button
                           type="button"
@@ -416,6 +495,30 @@ export class ProjectExplorer {
   readonly unknownCount = computed(() =>
     this.gitlab.projects().filter(p => p.specType === 'unknown').length
   );
+
+  readonly cachedCount = computed(() =>
+    this.gitlab.projects().filter(p => p.isCached).length
+  );
+
+  readonly unresolvedCount = computed(() =>
+    this.gitlab.projects().filter(p => !p.isCached).length
+  );
+
+  async refreshSingleProject(project: GitlabProject, event?: Event) {
+    if (event) {
+      event.stopPropagation();
+    }
+    await this.gitlab.resolveProjectMetadata(project, true);
+  }
+
+  async scanUnresolved() {
+    const uncached = this.gitlab.projects().filter(p => !p.isCached);
+    await this.gitlab.resolveAllProjectMetadata(uncached, false);
+  }
+
+  async refreshAllWithCacheCheck() {
+    await this.gitlab.resolveAllProjectMetadata(this.gitlab.projects(), false);
+  }
 
   readonly filteredProjects = computed(() => {
     const list = this.gitlab.projects();
