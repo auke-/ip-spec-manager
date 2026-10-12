@@ -1,0 +1,6 @@
+{
+  "name": "GitLab API Specification Manager",
+  "description": "Manage, unpack, normalize, diff, version, and commit enterprise SuwiML, SOAP, and OpenAPI specifications across private GitLab subgroups.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

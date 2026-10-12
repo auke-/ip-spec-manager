@@ -1,0 +1,236 @@
+<div class="min-h-screen bg-slate-50 flex flex-col text-slate-900 font-sans">
+  
+  <!-- Top Bar Contract Header -->
+  <app-header
+    [activeTab]="currentTab()"
+    (navigateTab)="currentTab.set($any($event))"
+    (openSettings)="isSettingsOpen.set(true)"
+    (startWizard)="openWizard()" />
+
+  <!-- Sub-Header Workspace Context Bar -->
+  <section class="bg-white border-b border-slate-200 py-4 px-4 sm:px-6 lg:px-8">
+    <div class="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div>
+        <div class="flex items-center gap-2 text-xs font-mono text-slate-500">
+          @if (!gitlab.config().isDemoMode) {
+            <span class="inline-flex items-center gap-1.5 text-emerald-700 font-bold">
+              <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+              Direct Browser Live GitLab
+            </span>
+            <span>·</span>
+            <span class="text-slate-900 font-semibold">{{ gitlab.config().hostUrl }}</span>
+            <span>·</span>
+            <span>Group: {{ gitlab.config().rootGroupPath }}</span>
+          } @else {
+            <span class="inline-flex items-center gap-1.5 text-indigo-700 font-bold">
+              <span class="w-2 h-2 rounded-full bg-indigo-500"></span>
+              Offline Demo Sandbox
+            </span>
+            <span>·</span>
+            <button
+              type="button"
+              (click)="isSettingsOpen.set(true)"
+              class="text-indigo-600 hover:text-indigo-800 font-semibold hover:underline">
+              Switch to Live Instance →
+            </button>
+          }
+        </div>
+        <h1 class="text-xl font-extrabold tracking-tight text-slate-900 mt-1 font-display">
+          Enterprise API Specification Governance
+        </h1>
+        <p class="text-xs text-slate-600 mt-0.5">
+          {{ !gitlab.config().isDemoMode ? 'Connected directly to your GitLab instance for SuwiML SOAP (WSDL/XSD) and OpenAPI repository publishing.' : 'Automate SuwiML SOAP (WSDL/XSD) and OpenAPI repository publishing, Windows-to-Unix line ending normalization, and CI artifact extraction.' }}
+        </p>
+      </div>
+
+      <!-- Quick Action Buttons -->
+      <div class="flex items-center gap-3 shrink-0">
+        <button
+          type="button"
+          (click)="openWizard()"
+          class="px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 rounded-lg shadow-sm transition-colors flex items-center gap-1.5 cursor-pointer">
+          <mat-icon class="text-sm">file_upload</mat-icon>
+          <span>Upload Spec Zip</span>
+        </button>
+
+        <button
+          type="button"
+          (click)="isSettingsOpen.set(true)"
+          class="px-3 py-2 text-xs font-medium text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer">
+          <mat-icon class="text-sm">tune</mat-icon>
+          <span>{{ !gitlab.config().isDemoMode ? 'Live Settings' : 'Configure Live' }}</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Live Connection Warning Banner if any error -->
+    @if (!gitlab.config().isDemoMode && gitlab.connectionError(); as errorMsg) {
+      <div class="max-w-7xl mx-auto mt-3 p-3 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-900 flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2">
+          <mat-icon class="text-rose-600 text-base shrink-0">error_outline</mat-icon>
+          <span>Direct browser query error: {{ errorMsg }}</span>
+        </div>
+        <button
+          type="button"
+          (click)="isSettingsOpen.set(true)"
+          class="px-2.5 py-1 text-xs font-semibold text-rose-800 bg-rose-100 hover:bg-rose-200 rounded transition-colors shrink-0">
+          Fix Credentials / Host
+        </button>
+      </div>
+    }
+  </section>
+
+  <!-- Main Viewport Canvas -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+
+    @if (currentTab() === 'projects') {
+      <app-project-explorer
+        (inspectProject)="inspectProject($event)"
+        (updateProjectViaZip)="openWizard($event)"
+        (createNewProject)="openWizard()" />
+    }
+
+    @if (currentTab() === 'subgroups') {
+      <div class="space-y-6">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-base font-bold text-slate-900 font-display">Service Specification Subgroups</h2>
+            <p class="text-xs text-slate-500">Subgroups registered under <code>{{ gitlab.config().rootGroupPath }}</code></p>
+          </div>
+          <button
+            type="button"
+            (click)="openWizard()"
+            class="px-3.5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-xs flex items-center gap-1.5">
+            <mat-icon class="text-sm">add</mat-icon>
+            <span>New Specification in Subgroup</span>
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          @for (sub of gitlab.subgroups(); track sub.id) {
+            <div class="bg-white p-5 rounded-xl border border-slate-200 hover:border-indigo-300 transition-colors space-y-3">
+              <div class="flex items-start justify-between gap-3">
+                <div class="flex items-center gap-2.5">
+                  <div class="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-700 flex items-center justify-center">
+                    <mat-icon class="text-lg">account_tree</mat-icon>
+                  </div>
+                  <div>
+                    <h3 class="text-sm font-bold text-slate-900">{{ sub.name }}</h3>
+                    <span class="text-[11px] font-mono text-slate-400">{{ sub.full_path }}</span>
+                  </div>
+                </div>
+                <span class="text-xs font-mono tabular-nums text-slate-600 font-medium">
+                  {{ sub.projects_count }} projects
+                </span>
+              </div>
+
+              <p class="text-xs text-slate-600 leading-relaxed">
+                {{ sub.description }}
+              </p>
+
+              <div class="pt-3 border-t border-slate-100 flex items-center justify-between">
+                <a
+                  [href]="sub.web_url"
+                  target="_blank"
+                  class="text-[11px] text-slate-500 hover:text-slate-800 flex items-center gap-1">
+                  <span>GitLab Subgroup</span>
+                  <mat-icon class="text-xs">open_in_new</mat-icon>
+                </a>
+
+                <button
+                  type="button"
+                  (click)="currentTab.set('projects')"
+                  class="text-xs font-semibold text-indigo-600 hover:text-indigo-800 flex items-center gap-1">
+                  <span>Browse Projects</span>
+                  <mat-icon class="text-sm">arrow_forward</mat-icon>
+                </button>
+              </div>
+            </div>
+          }
+        </div>
+      </div>
+    }
+
+    @if (currentTab() === 'pipelines') {
+      <div class="space-y-6">
+        <div>
+          <h2 class="text-base font-bold text-slate-900 font-display">Recent CI/CD Extraction Pipelines</h2>
+          <p class="text-xs text-slate-500">Automated jobs extracting properties, JSON models, gRPC specs, and tests</p>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <table class="w-full text-left border-collapse text-xs">
+            <thead class="bg-slate-50 text-slate-500 text-[11px] uppercase font-semibold border-b border-slate-200">
+              <tr>
+                <th class="py-3 px-4">Pipeline</th>
+                <th class="py-3 px-3">Project</th>
+                <th class="py-3 px-3">Ref / Branch</th>
+                <th class="py-3 px-3">Stages</th>
+                <th class="py-3 px-3">Status</th>
+                <th class="py-3 px-4 text-right">GitLab</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100 font-mono">
+              @for (proj of gitlab.projects(); track proj.id) {
+                @if (proj.latestPipeline; as pipe) {
+                  <tr class="hover:bg-slate-50">
+                    <td class="py-3 px-4 font-bold text-slate-900">
+                      #{{ pipe.id }}
+                    </td>
+                    <td class="py-3 px-3 font-sans font-medium text-slate-800">
+                      {{ proj.name }}
+                    </td>
+                    <td class="py-3 px-3 text-slate-600">
+                      {{ pipe.ref }} ({{ pipe.sha }})
+                    </td>
+                    <td class="py-3 px-3 font-sans text-[11px] text-slate-600">
+                      validate → extract → compat → grpc
+                    </td>
+                    <td class="py-3 px-3 font-sans">
+                      @if (pipe.status === 'success') {
+                        <span class="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded text-[11px] font-semibold">Passed</span>
+                      } @else {
+                        <span class="text-amber-700 bg-amber-50 px-2 py-0.5 rounded text-[11px] font-semibold">{{ pipe.status }}</span>
+                      }
+                    </td>
+                    <td class="py-3 px-4 text-right font-sans">
+                      <a
+                        [href]="pipe.web_url"
+                        target="_blank"
+                        class="text-xs text-indigo-600 hover:text-indigo-800 font-medium inline-flex items-center gap-1">
+                        <span>Open CI</span>
+                        <mat-icon class="text-xs">open_in_new</mat-icon>
+                      </a>
+                    </td>
+                  </tr>
+                }
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    }
+
+  </main>
+
+  <!-- Modals & Drawers -->
+  @if (isSettingsOpen()) {
+    <app-connection-modal
+      (modalClosed)="isSettingsOpen.set(false)" />
+  }
+
+  @if (selectedProjectForInspection(); as inspectProj) {
+    <app-project-detail-drawer
+      [project]="inspectProj"
+      (closeRequested)="closeInspection()"
+      (updateProjectViaZip)="updateProjectFromDrawer($event)" />
+  }
+
+  @if (isWizardOpen()) {
+    <app-spec-wizard
+      [initialProject]="selectedProjectForWizard()"
+      (wizardCancelled)="closeWizard()"
+      (wizardFinished)="onWizardFinished()" />
+  }
+
+</div>

@@ -1,0 +1,6 @@
+{
+  "summary":  "Plan to extract and display metadata from generated-reference/nl/bkwi/specification/wsdl/*/service.properties. Includes Java properties parser with line-continuation support, abbreviated SuwiML Header and FWI version extraction, overview table column enhancements (Name, Op Count, Header, FWI), and full drawer inspection.",
+  "updatedAt":  "2026-10-10T13:17:27.527796203Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
