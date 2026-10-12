@@ -128,6 +128,7 @@ export interface ZipAnalysisResult {
   totalFiles: number;
   crlfCount: number;
   bomCount: number;
+  filteredMacArtifactsCount?: number;
   detectedOperations: string[];
   targetNamespace?: string;
   suwimlHeaderVersion?: string;

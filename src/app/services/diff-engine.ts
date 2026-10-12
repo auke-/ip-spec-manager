@@ -12,14 +12,25 @@ export class DiffEngine {
     uploadedFiles: UnpackedFile[],
     existingRepoFiles: { path: string; content: string }[] = []
   ): FileDiff[] {
+    const isMacArtifact = (p: string) => {
+      const normalized = p.replace(/\\/g, '/').replace(/^\.\//, '');
+      const segments = normalized.split('/');
+      const fileName = segments[segments.length - 1];
+      return segments[0] === '__MACOSX' || segments.includes('__MACOSX') || fileName.toLowerCase() === '.ds_store';
+    };
+
     const existingFileMap = new Map<string, string>();
     for (const f of existingRepoFiles) {
-      existingFileMap.set(f.path, f.content);
+      if (!isMacArtifact(f.path)) {
+        existingFileMap.set(f.path, f.content);
+      }
     }
 
     const uploadedMap = new Map<string, string>();
     for (const f of uploadedFiles) {
-      uploadedMap.set(f.path, f.content);
+      if (!isMacArtifact(f.path)) {
+        uploadedMap.set(f.path, f.content);
+      }
     }
 
     const allPaths = new Set([...existingFileMap.keys(), ...uploadedMap.keys()]);

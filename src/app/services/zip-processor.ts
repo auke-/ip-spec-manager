@@ -26,12 +26,19 @@ export class ZipProcessor {
 
     let crlfCount = 0;
     let bomCount = 0;
+    let filteredMacArtifactsCount = 0;
 
     const entries = Object.keys(zip.files).sort();
 
     for (const relativePath of entries) {
       const entry = zip.files[relativePath];
       if (entry.dir) continue; // Skip directory entries
+
+      // Filter out any '__MACOSX' root directories and '.DS_Store' files
+      if (this.isMacOsArtifact(relativePath)) {
+        filteredMacArtifactsCount++;
+        continue;
+      }
 
       const ext = relativePath.split('.').pop()?.toLowerCase() || '';
       const name = relativePath.split('/').pop() || relativePath;
@@ -110,6 +117,7 @@ export class ZipProcessor {
       totalFiles: unpackedFiles.length,
       crlfCount,
       bomCount,
+      filteredMacArtifactsCount,
       detectedOperations: analysis.operations,
       targetNamespace: analysis.targetNamespace,
       suwimlHeaderVersion: analysis.suwimlHeaderVersion,
@@ -117,6 +125,29 @@ export class ZipProcessor {
       serviceProperties: analysis.serviceProperties,
       parsedSummary: analysis.summary
     };
+  }
+
+  /**
+   * Identifies macOS archive artifacts that must be filtered out:
+   * 1. Any entry within a '__MACOSX' root directory or path segment
+   * 2. Any '.DS_Store' file (case-insensitive, root or nested within folders)
+   */
+  isMacOsArtifact(relativePath: string): boolean {
+    const normalized = relativePath.replace(/\\/g, '/').replace(/^\.\//, '');
+    const segments = normalized.split('/');
+    const fileName = segments[segments.length - 1];
+
+    // Filter out '__MACOSX' root directory or any nested '__MACOSX' directory
+    if (segments[0] === '__MACOSX' || segments.includes('__MACOSX')) {
+      return true;
+    }
+
+    // Filter out '.DS_Store' or AppleDouble '._.DS_Store' files anywhere in archive
+    if (fileName.toLowerCase() === '.ds_store' || fileName.toLowerCase() === '._.ds_store') {
+      return true;
+    }
+
+    return false;
   }
 
   private isTextExtension(ext: string): boolean {
@@ -214,11 +245,50 @@ export class ZipProcessor {
   /**
    * Generates a sample zip archive for quick demonstration and testing
    */
-  async generateSampleZip(type: 'suwiml' | 'openapi', withWindowsCrlf = true): Promise<File> {
+  async generateSampleZip(type: 'suwiml' | 'openapi' | 'macos-sample', withWindowsCrlf = true): Promise<File> {
     const zip = new JSZip();
     const eol = withWindowsCrlf ? '\r\n' : '\n';
 
-    if (type === 'suwiml') {
+    if (type === 'macos-sample') {
+      const wsdlContent = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"',
+        '             xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"',
+        '             xmlns:tns="http://suwiml.suwinet.nl/services/aow/v0401"',
+        '             xmlns:suwi="http://suwiml.suwinet.nl/headers/v0401"',
+        '             targetNamespace="http://suwiml.suwinet.nl/services/aow/v0401"',
+        '             name="SVB-AOW-Inkomsten-v0401">',
+        '  <types>',
+        '    <xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema">',
+        '      <xsd:import namespace="http://suwiml.suwinet.nl/services/aow/v0401" schemaLocation="schemas/aow-types.xsd"/>',
+        '    </xsd:schema>',
+        '  </types>',
+        '  <message name="RaadpleegAOWStatusRequest">',
+        '    <part name="parameters" element="tns:RaadpleegAOWStatus"/>',
+        '  </message>',
+        '  <message name="RaadpleegAOWStatusResponse">',
+        '    <part name="parameters" element="tns:RaadpleegAOWStatusResponse"/>',
+        '  </message>',
+        '  <portType name="AOWInkomstenPortType">',
+        '    <operation name="RaadpleegAOWStatus">',
+        '      <input message="tns:RaadpleegAOWStatusRequest"/>',
+        '      <output message="tns:RaadpleegAOWStatusResponse"/>',
+        '    </operation>',
+        '  </portType>',
+        '</definitions>'
+      ].join(eol);
+
+      zip.file('specs/SVB-AOW-Inkomsten-v0401.wsdl', wsdlContent);
+      zip.file('README.md', `# SVB AOW Inkomsten v0401 (macOS export)${eol}Archive exported on macOS.${eol}`);
+      // macOS metadata artifacts to be filtered
+      zip.file('.DS_Store', new Uint8Array([0x42, 0x75, 0x64, 0x31, 0x00, 0x00, 0x10, 0x00]));
+      zip.file('specs/.DS_Store', new Uint8Array([0x42, 0x75, 0x64, 0x31, 0x00, 0x00, 0x10, 0x00]));
+      zip.file('__MACOSX/._SVB-AOW-Inkomsten-v0401.wsdl', new Uint8Array([0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00]));
+      zip.file('__MACOSX/specs/._aow-types.xsd', new Uint8Array([0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00]));
+
+      const blob = await zip.generateAsync({ type: 'blob' });
+      return new File([blob], 'SVB-AOW-macOS-with-artifacts.zip', { type: 'application/zip' });
+    } else if (type === 'suwiml') {
       const wsdlContent = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"',

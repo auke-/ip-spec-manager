@@ -232,10 +232,10 @@ import { ZipProcessor } from '../../services/zip-processor';
                     Drop your WSDL or OpenAPI .zip archive here
                   </h4>
                   <p class="text-xs text-slate-500 mt-1 max-w-md">
-                    Supports archives containing WSDLs, XSDs, OpenAPI definitions, schemas, and README docs with Windows CRLF or Unix LF line endings.
+                    Supports archives containing WSDLs, XSDs, OpenAPI definitions, schemas, and README docs. Automatically filters out macOS metadata (<code class="font-mono text-[11px] bg-slate-100 text-slate-700 px-1 py-0.5 rounded">__MACOSX/</code>, <code class="font-mono text-[11px] bg-slate-100 text-slate-700 px-1 py-0.5 rounded">.DS_Store</code>).
                   </p>
 
-                  <div class="mt-4 flex items-center gap-3">
+                  <div class="mt-4 flex flex-wrap items-center justify-center gap-2.5">
                     <label for="wiz-file-upload" class="px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-xs cursor-pointer transition-colors flex items-center gap-1.5">
                       <mat-icon class="text-sm">file_upload</mat-icon>
                       <span>Choose File...</span>
@@ -256,6 +256,15 @@ import { ZipProcessor } from '../../services/zip-processor';
                       (click)="loadSampleZip('openapi')"
                       class="px-2.5 py-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors border border-emerald-200">
                       OpenAPI Sample Zip
+                    </button>
+
+                    <button
+                      type="button"
+                      (click)="loadSampleZip('macos-sample')"
+                      title="Test automatic exclusion of __MACOSX and .DS_Store artifacts"
+                      class="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-300 flex items-center gap-1">
+                      <mat-icon class="text-xs text-slate-600">cleaning_services</mat-icon>
+                      <span>Test macOS Zip</span>
                     </button>
                   </div>
 
@@ -315,6 +324,20 @@ import { ZipProcessor } from '../../services/zip-processor';
                     <div class="pt-2 text-xs">
                       <span class="text-slate-500 font-medium">Extracted Operations: </span>
                       <span class="font-mono text-slate-800">{{ zipAnalysis()!.detectedOperations.join(', ') }}</span>
+                    </div>
+                  }
+
+                  @if (zipAnalysis()!.filteredMacArtifactsCount && zipAnalysis()!.filteredMacArtifactsCount! > 0) {
+                    <div class="p-3 bg-amber-50 rounded-xl border border-amber-200/90 flex items-center justify-between text-xs text-amber-900 mt-2">
+                      <div class="flex items-center gap-2">
+                        <mat-icon class="text-amber-600 text-sm">cleaning_services</mat-icon>
+                        <span>
+                          Filtered <strong>{{ zipAnalysis()!.filteredMacArtifactsCount }}</strong> macOS metadata file(s) (<code class="font-mono text-[11px] bg-white px-1.5 py-0.5 rounded border border-amber-300 font-semibold">__MACOSX/</code>, <code class="font-mono text-[11px] bg-white px-1.5 py-0.5 rounded border border-amber-300 font-semibold">.DS_Store</code>)
+                        </span>
+                      </div>
+                      <span class="text-[10px] font-bold text-amber-800 uppercase tracking-wide bg-amber-200/60 px-2 py-0.5 rounded">
+                        Excluded from Commit
+                      </span>
                     </div>
                   }
                 </div>
@@ -859,7 +882,7 @@ export class SpecWizard implements OnInit {
     }
   }
 
-  async loadSampleZip(type: 'suwiml' | 'openapi') {
+  async loadSampleZip(type: 'suwiml' | 'openapi' | 'macos-sample') {
     const file = await this.zipProcessor.generateSampleZip(type, true);
     await this.processZip(file);
   }
