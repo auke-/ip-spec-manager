@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, computed, inject, input, output, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, effect, inject, input, OnInit, output, signal } from '@angular/core';
 import { UpperCasePipe } from '@angular/common';
 import { FormControl, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
@@ -133,17 +133,44 @@ import { ZipProcessor } from '../../services/zip-processor';
 
                 @if (!isNewProject()) {
                   <div>
-                    <label for="wiz-select-project" class="block text-xs font-semibold text-slate-700 mb-1">Select Existing Specification Project</label>
+                    <div class="flex items-center justify-between mb-1">
+                      <label for="wiz-select-project" class="block text-xs font-semibold text-slate-700">
+                        Select Existing Specification Project
+                      </label>
+                      @if (initialProject()) {
+                        <span class="text-[11px] font-medium text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200/80 flex items-center gap-1">
+                          <mat-icon class="text-xs text-indigo-600">check_circle</mat-icon>
+                          <span>Pre-selected: {{ initialProject()?.name }}</span>
+                        </span>
+                      }
+                    </div>
                     <select
                       id="wiz-select-project"
                       [formControl]="selectedProjectControl"
                       class="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 font-mono">
-                      @for (p of gitlab.projects(); track p.id) {
-                        <option [value]="p.id">
+                      @for (p of availableProjects(); track p.id) {
+                        <option [value]="p.id" [ngValue]="p.id">
                           {{ p.subgroupPath }} / {{ p.name }} (Current: {{ p.currentTag || 'v1.0.0' }} - {{ p.specType }})
                         </option>
                       }
                     </select>
+
+                    @if (selectedProject(); as sp) {
+                      <div class="mt-2.5 p-2.5 bg-indigo-50/60 rounded-lg border border-indigo-100 flex items-center justify-between text-xs">
+                        <div class="flex items-center gap-2 flex-wrap">
+                          <mat-icon class="text-sm text-indigo-600">domain_verification</mat-icon>
+                          <span class="text-slate-500 text-[11px]">Target repo:</span>
+                          <span class="font-bold text-slate-900 font-mono">{{ sp.name }}</span>
+                          <span class="text-indigo-700 font-medium font-mono text-[11px] bg-white px-1.5 py-0.5 rounded border border-indigo-200">
+                            Tag: {{ sp.currentTag || '0.1.0' }}
+                          </span>
+                          <span class="text-slate-600 font-medium text-[11px] capitalize">
+                            Type: {{ sp.specType }}
+                          </span>
+                        </div>
+                        <span class="text-[11px] text-slate-500 font-mono">{{ sp.subgroupPath }}</span>
+                      </div>
+                    }
                   </div>
                 } @else {
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -569,6 +596,16 @@ import { ZipProcessor } from '../../services/zip-processor';
                     </p>
                   </div>
 
+                  @if (commitError(); as errMsg) {
+                    <div class="p-3 bg-rose-50 rounded-lg border border-rose-200 text-xs text-rose-800 flex items-start gap-2">
+                      <mat-icon class="text-sm text-rose-600 shrink-0 mt-0.5">error_outline</mat-icon>
+                      <div class="flex-1">
+                        <div class="font-semibold">Commit Error</div>
+                        <div>{{ errMsg }}</div>
+                      </div>
+                    </div>
+                  }
+
                   <div class="pt-2 flex justify-end">
                     <button
                       type="button"
@@ -715,7 +752,7 @@ import { ZipProcessor } from '../../services/zip-processor';
     </div>
   `
 })
-export class SpecWizard {
+export class SpecWizard implements OnInit {
   readonly initialProject = input<GitlabProject | null>(null);
   readonly wizardCancelled = output<void>();
   readonly wizardFinished = output<void>();
@@ -737,6 +774,7 @@ export class SpecWizard {
 
   readonly isCommitting = signal<boolean>(false);
   readonly commitResult = signal<CommitExecutionResult | null>(null);
+  readonly commitError = signal<string | null>(null);
 
   readonly selectedProjectControl = new FormControl<number>(0, { nonNullable: true });
   readonly newSubgroupControl = new FormControl<number>(101, { nonNullable: true });
@@ -746,15 +784,40 @@ export class SpecWizard {
   readonly commitTypeControl = new FormControl<'feat!' | 'feat' | 'fix' | 'chore' | 'docs'>('fix', { nonNullable: true });
   readonly commitSubjectControl = new FormControl('', { nonNullable: true });
 
+  readonly availableProjects = computed(() => {
+    const list = this.gitlab.projects();
+    const init = this.initialProject();
+    if (init && !list.some(p => p.id === init.id)) {
+      return [init, ...list];
+    }
+    return list;
+  });
+
+  readonly selectedProject = computed(() => {
+    const selectedId = this.selectedProjectControl.value;
+    return this.availableProjects().find(p => p.id === selectedId) || this.initialProject() || null;
+  });
+
   constructor() {
-    // If preselected project passed, initialize
+    effect(() => {
+      const init = this.initialProject();
+      if (init) {
+        this.selectedProjectControl.setValue(init.id);
+        this.isNewProject.set(false);
+      }
+    });
+  }
+
+  ngOnInit() {
     const init = this.initialProject();
     if (init) {
       this.selectedProjectControl.setValue(init.id);
       this.isNewProject.set(false);
     } else {
-      const first = this.gitlab.projects()[0];
-      if (first) this.selectedProjectControl.setValue(first.id);
+      const first = this.availableProjects()[0];
+      if (first && !this.selectedProjectControl.value) {
+        this.selectedProjectControl.setValue(first.id);
+      }
     }
   }
 
@@ -901,6 +964,7 @@ export class SpecWizard {
 
   async executeCommit() {
     this.isCommitting.set(true);
+    this.commitError.set(null);
 
     try {
       let project: GitlabProject;
@@ -915,7 +979,7 @@ export class SpecWizard {
           specType: validSpecType
         });
       } else {
-        const found = this.gitlab.projects().find(p => p.id === this.selectedProjectControl.value);
+        const found = this.gitlab.projects().find(p => p.id === this.selectedProjectControl.value) || this.initialProject();
         if (!found) throw new Error('Target project not found');
         project = found;
       }
@@ -940,7 +1004,7 @@ export class SpecWizard {
       this.commitResult.set(res);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Commit failed';
-      alert(`Commit Error: ${msg}`);
+      this.commitError.set(msg);
     } finally {
       this.isCommitting.set(false);
     }

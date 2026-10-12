@@ -66,6 +66,14 @@ import { GitlabApi } from '../../services/gitlab-api';
                   <span>Force Refresh</span>
                 </button>
               }
+              <button
+                type="button"
+                (click)="updateProjectViaZip.emit(currentProject())"
+                title="Upload updated zip file for this specification"
+                class="px-2 py-0.5 text-[10px] font-semibold text-indigo-700 hover:text-indigo-900 bg-indigo-50 hover:bg-indigo-100 rounded border border-indigo-200 transition-colors flex items-center gap-1 cursor-pointer">
+                <mat-icon class="text-xs">upload_file</mat-icon>
+                <span>Update Spec</span>
+              </button>
             </div>
             @if (currentProject().serviceProperties?.serviceName && currentProject().serviceProperties?.serviceName !== currentProject().name) {
               <div class="text-xs text-slate-500 font-mono mt-0.5">Repo: {{ currentProject().name }}</div>
@@ -574,8 +582,8 @@ service {{ protoServiceName() }}Service &#123;
 
           <button
             type="button"
-            (click)="updateProjectViaZip.emit(project())"
-            class="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm transition-colors flex items-center gap-1.5">
+            (click)="updateProjectViaZip.emit(currentProject())"
+            class="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm transition-colors flex items-center gap-1.5 cursor-pointer">
             <mat-icon class="text-sm">upload_file</mat-icon>
             <span>Update Specification via Zip</span>
           </button>
